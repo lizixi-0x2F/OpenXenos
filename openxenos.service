@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenXenos multi-model deliberation proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/uv run openxenos
+WorkingDirectory=__INSTALL_DIR__
+EnvironmentFile=__INSTALL_DIR__/.env
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
