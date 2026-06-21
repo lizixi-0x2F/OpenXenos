@@ -1,77 +1,108 @@
+<p align="center">
+  <img src="https://img.shields.io/badge/license-MIT-blue" alt="License MIT">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/code%20size-~400%20lines-lightgrey" alt="~400 lines">
+  <img src="https://img.shields.io/badge/KISS-keep%20it%20simple-brightgreen" alt="KISS">
+  <br>
+  <em>OpenRouter Fusion 的开源复刻，遵循 KISS 原则 — 无裁判，零加价，纯 Python。</em>
+</p>
+
 # OpenXenos
 
-**Open-source multi-model fusion — the OpenRouter Fusion pattern, without the judge.**
+**多模型审议代理，自带共识。**
 
-OpenRouter Fusion fans out one prompt to N models, runs a separate judge to compare their answers, then synthesizes a final response. It works, but the judge is an unnecessary abstraction. The panel models can see each other's answers and converge on their own.
+OpenRouter Fusion 把你的提问广播给 N 个模型，另跑一个裁判模型来比较它们的回答，最后合成一个最终输出。思路不坏，但裁判是个多余的抽象。模型们能看到彼此的回答，让它们自己聊出共识就行。
 
-OpenXenos does exactly that. No judge. No API key markup. No vendor lock-in. ~200 lines of Python.
+OpenXenos 就干这一件事。没有裁判。没有 API 加价。没有厂商锁定。约 400 行 Python。
+
+---
 
 ## vs OpenRouter Fusion
 
 | | OpenRouter Fusion | OpenXenos |
 |---|---|---|
-| Architecture | panel → judge → synthesize | panel ↔ panel (dense message-passing) |
-| Judge model | separate model, extra cost | none — models converge on their own |
-| Consensus | judge decides | models signal DONE when they agree |
-| Output | single judge-written answer | single panel-written answer |
-| API format | OpenRouter-proprietary | Anthropic Messages API (transparent proxy) |
-| Model diversity | configurable presets | sampling stochasticity + temperature |
-| Claude Code integration | api_key + model slug | `export ANTHROPIC_BASE_URL=...` |
-| Pricing | per-token markup | your own API keys, zero margin |
-| Source | closed | `uv run openxenos` |
+| 架构 | panel → judge → synthesize | panel ↔ panel（全连接消息传递） |
+| 裁判模型 | 独立模型，额外开销 | **无** — 模型自协商收敛 |
+| 共识 | 裁判拍板 | 任意模型宣布 DONE 即胜出 |
+| 输出 | 裁判统一撰写 | panel 自行撰写 |
+| API 格式 | OpenRouter 私有 | Anthropic Messages API（透明代理） |
+| 模型多样性 | 可配置不同模型组合 | 采样随机性 + 温度 |
+| Claude Code 集成 | api_key + model slug | `export ANTHROPIC_BASE_URL=...` |
+| 定价 | 按 token 加价 | 你自己的 API key，零加价 |
+| 源码 | 闭源 | `uv run openxenos` |
 
-## How It Works
+---
+
+## 它怎么工作
 
 ```
-POST /v1/messages (Anthropic format)
+POST /v1/messages（Anthropic 格式）
         │
-        ├─ Has tools? → pass-through, zero overhead
+        ├─ 有 tools？→ 直通，零开销
         │
-        └─ No tools?  → deliberation:
+        └─ 无 tools？→ 审议：
               │
-              Round 1: N models answer simultaneously
-              │        as_completed() — answers pool up like a group chat
+              Round 1：N 个模型同时作答
+              │        as_completed() — 回答像群聊一样汇聚
               │
-              Round 2+: N models see the full accumulated discussion
-              │         each signals DONE or REVIEW
-              │         DONE → output immediately
-              │         REVIEW → critique added to pool, repeat
-              │         max 10 rounds
+              Round 2+：N 个模型看到完整讨论记录
+              │         各自判定 DONE 或 REVIEW
+              │         DONE → 立即输出
+              │         REVIEW → 批评加入讨论池，继续
+              │         最多 10 轮
               │
-              → single answer, one voice
+              → 一个答案，一个声音
 ```
 
-### Round 1 — Diverge
+### Round 1 — 发散
 
-All N models fire at once with the same prompt. Same model, same temperature — diversity comes purely from sampling stochasticity. Each model produces a slightly different answer: different framing, different emphasis, sometimes different conclusions.
+所有 N 个模型同时收到相同 prompt。同一个模型，同一组参数 — 多样性纯粹来自采样随机性。每个模型的回答都略有不同：侧重不同，角度不同，有时结论也不同。
 
-Answers stream into a shared message pool via `asyncio.as_completed()` — whoever finishes first gets read first. This is dense: every model's output is immediately visible to the group.
+回答通过 `asyncio.as_completed()` 流入共享讨论池 — 谁先写完谁先被看到。密集广播：每个模型的输出对其他模型立即可见。
 
-### Round 2+ — Converge
+### Round 2+ — 收敛
 
-All N models see the complete accumulated discussion pool — Round 1 answers plus all REVIEW critiques from previous rounds. Each independently decides:
+所有 N 个模型都看到完整的累积讨论池 — Round 1 的回答加上之前每一轮的 REVIEW 批评。各自独立决定：
 
-- **DONE** — the group has converged. Here's the final answer.
-- **REVIEW** — there are still substantive disagreements. Here's an improved answer.
+- **DONE** — 团队已收敛。这是最终答案。
+- **REVIEW** — 还存在实质分歧、盲点或未解决问题。写批评并给出改进答案。
 
-The **first DONE wins**. No majority threshold. No judge picking winners. The moment any model declares consensus, that answer ships.
+**首个 DONE 胜出。** 没有多数表决。没有裁判选优。哪个模型先确认共识，哪个的答案就发出去。
 
-If all models signal REVIEW, their critiques are added to the discussion pool and another round begins. This repeats until someone says DONE or the maximum rounds (default 10) is reached. REVIEW is never output — it's an internal signal meaning "keep discussing."
+如果所有模型都 REVIEW，批评追加到讨论池，进入下一轮。直到有人喊 DONE，或达到最大轮数（默认 10）。REVIEW 永远不会输出给用户 — 它是内部信号，意思是"接着聊"。
 
-### Tool pass-through
+### Tool 直通
 
-When Claude Code sends a request with tools (Bash, Read, Write, Agent…), OpenXonos passes it straight through to DeepSeek — no deliberation overhead. This keeps Claude Code's agent loop fast and responsive. Deliberation only kicks in for pure reasoning tasks.
+Claude Code 发来带 tools（Bash、Read、Write、Agent…）的请求时，OpenXenos 直接转发给 DeepSeek — 不触发审议。这保证了 Claude Code 的 agent 循环快速响应。审议只在纯推理任务中启用。
 
-## Quick Start
+---
+
+## KISS 设计原则
+
+1. **无裁判。** Panel 模型互相看到彼此的工作，自行收敛。额外的裁判 = 额外的成本和瓶颈。
+
+2. **无人设工程。** 多样性来自采样。同样的模型，同样的温度，不同的骰子。
+
+3. **无模型名校验。** 服务器与模型无关。客户端发什么模型名，就转发什么。`/v1/models` 返回空 — 所有模型名都有效。
+
+4. **全连接。** 每个模型看到其他每个模型的输出。不是链，不是树，是完全图。
+
+5. **工具透明。** 带工具的请求原样穿透。审议是为推理设计的，不是为执行 `ls`。
+
+6. **薄代理。** 零格式转换。DeepSeek 原生支持 Anthropic 格式。请求原样透传。
+
+---
+
+## 快速开始
 
 ```bash
-git clone …/openxenos && cd openxenos
+git clone https://github.com/lizixi-0x2F/OpenXenos && cd OpenXenos
 
-# Set your DeepSeek credentials
+# 配置 DeepSeek 凭据
 cp .env.example .env
-# Edit .env → ANTHROPIC_AUTH_TOKEN=sk-…
+# 编辑 .env → ANTHROPIC_AUTH_TOKEN=sk-…
 
-# Install & run
+# 安装并运行
 uv sync
 uv run openxenos
 # → http://0.0.0.0:2222
@@ -83,55 +114,55 @@ uv run openxenos
 export ANTHROPIC_BASE_URL=http://localhost:2222
 ```
 
-Done. Claude Code now routes every message through 3-model deliberation. Tool calls pass through at native speed. Reasoning questions get the full panel treatment.
+搞定。Claude Code 现在把所有消息通过 3 模型审议路由。Tool 调用以原速穿透。推理问题获得完整的 panel 处理。
 
-### Auto-start (Linux & macOS)
+### 自启动（Linux & macOS）
 
 ```bash
 ./install.sh
-# Linux  → systemd user service, starts on boot
-# macOS  → launchd user agent, starts on boot
-# Port:  2222
+# Linux  → systemd user service，开机自启
+# macOS  → launchd user agent，开机自启
+# 端口：2222
 ```
 
-**Linux:**
+**Linux：**
 ```bash
-# Check status
-systemctl --user status openxenos
-# View logs
-journalctl --user -u openxenos -f
+systemctl --user status openxenos        # 状态
+journalctl --user -u openxenos -f         # 日志
 ```
 
-**macOS:**
+**macOS：**
 ```bash
-# Check status
-launchctl list | grep openxenos
-# View logs
-tail -f ~/Library/Logs/openxenos.log
+launchctl list | grep openxenos           # 状态
+tail -f ~/Library/Logs/openxenos.log      # 日志
 ```
 
-## Configuration
+---
 
-All via `.env`:
+## 配置
 
-| Variable | Default | |
+全部通过 `.env`：
+
+| 变量 | 默认值 | 说明 |
 |---|---|---|
-| `ANTHROPIC_AUTH_TOKEN` | — | DeepSeek API key (**required**) |
-| `ANTHROPIC_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek endpoint |
-| `ANTHROPIC_MODEL` | `deepseek-v4-pro` | model name |
-| `OPENXENOS_PORT` | `2222` | server port |
-| `OPENXENOS_PANEL_SIZE` | `3` | models in the panel |
-| `OPENXENOS_PHASE1_TEMP` | `0.8` | divergence temperature |
-| `OPENXENOS_PHASE2_TEMP` | `0.5` | convergence temperature |
-| `OPENXENOS_MAX_ROUNDS` | `10` | max discussion rounds |
+| `ANTHROPIC_AUTH_TOKEN` | — | DeepSeek API key（**必填**） |
+| `ANTHROPIC_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek 端点 |
+| `ANTHROPIC_MODEL` | `deepseek-v4-pro` | 模型名称 |
+| `OPENXENOS_PORT` | `2222` | 服务器端口 |
+| `OPENXENOS_PANEL_SIZE` | `3` | panel 模型数量 |
+| `OPENXENOS_PHASE1_TEMP` | `0.8` | 发散阶段温度 |
+| `OPENXENOS_PHASE2_TEMP` | `0.5` | 收敛阶段温度 |
+| `OPENXENOS_MAX_ROUNDS` | `10` | 最大审议轮数 |
+
+---
 
 ## API
 
 ### `POST /v1/messages`
 
-Anthropic Messages API compatible. Full pass-through: `system`, `messages`, `tools`, `tool_choice`, `thinking`, `temperature`, `max_tokens` — all forwarded to DeepSeek.
+兼容 Anthropic Messages API。完整透传：`system`、`messages`、`tools`、`tool_choice`、`thinking`、`temperature`、`max_tokens` — 全部转发给 DeepSeek。
 
-Response includes `_openxenos` metadata: Phase 1 previews, verdicts, failed indices.
+响应中包含 `_openxenos` 元数据：Phase 1 预览、判决记录、失败模型索引。
 
 ### `GET /health`
 
@@ -139,16 +170,8 @@ Response includes `_openxenos` metadata: Phase 1 previews, verdicts, failed indi
 {"status": "ok", "panel_size": 3, "model": "deepseek-v4-pro"}
 ```
 
-## Design principles
+---
 
-1. **No judge.** Panel models see each other's work and converge on their own. A separate judge is a cost center and a bottleneck.
+## License
 
-2. **No persona engineering.** Diversity comes from sampling. Same model, same temperature, different roll of the dice.
-
-3. **No model-name encoding.** The server is model-agnostic. Whatever model the client sends, it routes to the configured backend. `/v1/models` returns nothing — every model name is valid.
-
-4. **Dense connectivity.** Every model sees every other model's output. Not a chain. Not a tree. A fully connected graph.
-
-5. **Tool transparency.** Tool-using requests pass through untouched. Deliberation is for reasoning, not for running `ls`.
-
-6. **Thin proxy.** Zero format conversion. DeepSeek speaks Anthropic natively. Requests flow through as-is.
+MIT — 自由使用，随意分叉。
