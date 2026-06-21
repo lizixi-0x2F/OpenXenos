@@ -39,6 +39,8 @@ That's all OpenXenos does. No judge. No API key markup. No vendor lock-in. ~400 
 
 ## How It Works
 
+![OpenXenos Architecture](Diagram.png)
+
 ```
 POST /v1/messages (Anthropic format)
         │
