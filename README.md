@@ -79,7 +79,7 @@ If all models signal REVIEW, their critiques are added to the discussion pool an
 
 ### Tool pass-through
 
-When Claude Code sends a request with tools (Bash, Read, Write, Agent…), OpenXenos passes it straight through to DeepSeek — no deliberation overhead. This keeps Claude Code's agent loop fast and responsive. Deliberation only kicks in for pure reasoning tasks.
+When Claude Code sends a request with tools (Bash, Read, Write, Agent…), OpenXenos passes it straight through to the upstream model — no deliberation overhead. This keeps Claude Code's agent loop fast and responsive. Deliberation only kicks in for pure reasoning tasks.
 
 ---
 
@@ -95,7 +95,7 @@ When Claude Code sends a request with tools (Bash, Read, Write, Agent…), OpenX
 
 5. **Tool transparency.** Tool-using requests pass through untouched. Deliberation is for reasoning, not for running `ls`.
 
-6. **Thin proxy.** Zero format conversion. DeepSeek speaks Anthropic natively. Requests flow through as-is.
+6. **Thin proxy.** Zero format conversion. The upstream API speaks Anthropic natively. Requests flow through as-is.
 
 ---
 
@@ -104,7 +104,7 @@ When Claude Code sends a request with tools (Bash, Read, Write, Agent…), OpenX
 ```bash
 git clone https://github.com/lizixi-0x2F/OpenXenos && cd OpenXenos
 
-# Set your DeepSeek credentials
+# Set your API credentials
 cp .env.example .env
 # Edit .env → ANTHROPIC_AUTH_TOKEN=sk-…
 
@@ -151,9 +151,9 @@ All via `.env`:
 
 | Variable | Default | Description |
 |---|---|---|
-| `ANTHROPIC_AUTH_TOKEN` | — | DeepSeek API key (**required**) |
-| `ANTHROPIC_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek endpoint |
-| `ANTHROPIC_MODEL` | `deepseek-v4-pro` | model name |
+| `ANTHROPIC_AUTH_TOKEN` | — | API key for your Anthropic-compatible provider (**required**) |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Anthropic Messages API endpoint |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | model name |
 | `OPENXENOS_PORT` | `2222` | server port |
 | `OPENXENOS_PANEL_SIZE` | `3` | models in the panel |
 | `OPENXENOS_PHASE1_TEMP` | `0.8` | divergence temperature |
@@ -166,14 +166,14 @@ All via `.env`:
 
 ### `POST /v1/messages`
 
-Anthropic Messages API compatible. Full pass-through: `system`, `messages`, `tools`, `tool_choice`, `thinking`, `temperature`, `max_tokens` — all forwarded to DeepSeek.
+Anthropic Messages API compatible. Full pass-through: `system`, `messages`, `tools`, `tool_choice`, `thinking`, `temperature`, `max_tokens` — all forwarded to the upstream model.
 
 Response includes `_openxenos` metadata: Phase 1 previews, verdicts, failed indices.
 
 ### `GET /health`
 
 ```json
-{"status": "ok", "panel_size": 3, "model": "deepseek-v4-pro"}
+{"status": "ok", "panel_size": 3, "model": "claude-sonnet-4-6"}
 ```
 
 ---

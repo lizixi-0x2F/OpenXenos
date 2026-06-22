@@ -79,7 +79,7 @@ POST /v1/messages（Anthropic 格式）
 
 ### Tool 直通
 
-Claude Code 发来带 tools（Bash、Read、Write、Agent…）的请求时，OpenXenos 直接转发给 DeepSeek — 不触发审议。这保证了 Claude Code 的 agent 循环快速响应。审议只在纯推理任务中启用。
+Claude Code 发来带 tools（Bash、Read、Write、Agent…）的请求时，OpenXenos 直接转发给上游模型 — 不触发审议。这保证了 Claude Code 的 agent 循环快速响应。审议只在纯推理任务中启用。
 
 ---
 
@@ -95,7 +95,7 @@ Claude Code 发来带 tools（Bash、Read、Write、Agent…）的请求时，Op
 
 5. **工具透明。** 带工具的请求原样穿透。审议是为推理设计的，不是为执行 `ls`。
 
-6. **薄代理。** 零格式转换。DeepSeek 原生支持 Anthropic 格式。请求原样透传。
+6. **薄代理。** 零格式转换。上游 API 原生支持 Anthropic 格式。请求原样透传。
 
 ---
 
@@ -104,7 +104,7 @@ Claude Code 发来带 tools（Bash、Read、Write、Agent…）的请求时，Op
 ```bash
 git clone https://github.com/lizixi-0x2F/OpenXenos && cd OpenXenos
 
-# 配置 DeepSeek 凭据
+# 配置 API 凭据
 cp .env.example .env
 # 编辑 .env → ANTHROPIC_AUTH_TOKEN=sk-…
 
@@ -151,9 +151,9 @@ tail -f ~/Library/Logs/openxenos.log      # 日志
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
-| `ANTHROPIC_AUTH_TOKEN` | — | DeepSeek API key（**必填**） |
-| `ANTHROPIC_BASE_URL` | `https://api.deepseek.com/anthropic` | DeepSeek 端点 |
-| `ANTHROPIC_MODEL` | `deepseek-v4-pro` | 模型名称 |
+| `ANTHROPIC_AUTH_TOKEN` | — | Anthropic 兼容服务商的 API key（**必填**） |
+| `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | Anthropic Messages API 端点 |
+| `ANTHROPIC_MODEL` | `claude-sonnet-4-6` | 模型名称 |
 | `OPENXENOS_PORT` | `2222` | 服务器端口 |
 | `OPENXENOS_PANEL_SIZE` | `3` | panel 模型数量 |
 | `OPENXENOS_PHASE1_TEMP` | `0.8` | 发散阶段温度 |
@@ -166,14 +166,14 @@ tail -f ~/Library/Logs/openxenos.log      # 日志
 
 ### `POST /v1/messages`
 
-兼容 Anthropic Messages API。完整透传：`system`、`messages`、`tools`、`tool_choice`、`thinking`、`temperature`、`max_tokens` — 全部转发给 DeepSeek。
+兼容 Anthropic Messages API。完整透传：`system`、`messages`、`tools`、`tool_choice`、`thinking`、`temperature`、`max_tokens` — 全部转发给上游模型。
 
 响应中包含 `_openxenos` 元数据：Phase 1 预览、判决记录、失败模型索引。
 
 ### `GET /health`
 
 ```json
-{"status": "ok", "panel_size": 3, "model": "deepseek-v4-pro"}
+{"status": "ok", "panel_size": 3, "model": "claude-sonnet-4-6"}
 ```
 
 ---

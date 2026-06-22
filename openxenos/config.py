@@ -4,9 +4,9 @@ Configuration — reads API keys and model settings from environment variables.
 Loads .env file if present (for launchd auto-start).
 
 Expected env vars:
-    ANTHROPIC_BASE_URL   — DeepSeek Anthropic-compatible endpoint
+    ANTHROPIC_BASE_URL   — Anthropic Messages API endpoint (any compatible provider)
     ANTHROPIC_AUTH_TOKEN — API key
-    ANTHROPIC_MODEL      — model name (e.g. deepseek-v4-pro[1m])
+    ANTHROPIC_MODEL      — model name (e.g. claude-sonnet-4-6)
 """
 
 import os
@@ -24,10 +24,10 @@ if _env_path.exists():
                 if key not in os.environ:
                     os.environ[key] = val
 
-# ── DeepSeek Anthropic API ─────────────────────────────────────
+# ── Anthropic Messages API ──────────────────────────────────────
 API_KEY = os.getenv("ANTHROPIC_AUTH_TOKEN", "")
-BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.deepseek.com/anthropic")
-MODEL = os.getenv("ANTHROPIC_MODEL", "deepseek-v4-pro")
+BASE_URL = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+MODEL = os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
 
 # ── Deliberation parameters ────────────────────────────────────
 PANEL_SIZE = int(os.getenv("OPENXENOS_PANEL_SIZE", "3"))

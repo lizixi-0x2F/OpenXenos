@@ -6,7 +6,7 @@ Claude Code points its Anthropic base_url here, we intercept the request,
 run multi-model deliberation, and return an Anthropic-format response.
 
 Supports both batch (non-streaming) and SSE streaming (stream=True).
-Streaming passthrough: proxy DeepSeek SSE chunks directly.
+Streaming passthrough: proxy upstream SSE chunks directly.
 Streaming deliberation: run deliberation, then emit final answer as SSE events.
 
 Usage:
@@ -207,7 +207,7 @@ async def create_message(request: AnthropicRequest):
     Pure reasoning requests (no tools): run multi-model deliberation.
 
     Supports streaming (stream=True) for both paths:
-    - Passthrough: proxy DeepSeek SSE chunks directly.
+    - Passthrough: proxy upstream SSE chunks directly.
     - Deliberation: run deliberation batch, then emit final answer as SSE events.
     """
     client = _get_client()
@@ -218,7 +218,7 @@ async def create_message(request: AnthropicRequest):
     if request.tools:
         logger.info("→ tools detected, pass-through (no deliberation)")
 
-        # Streaming passthrough: proxy DeepSeek SSE chunks
+        # Streaming passthrough: proxy upstream SSE chunks
         if request.stream:
             logger.info("→ streaming passthrough mode")
             try:

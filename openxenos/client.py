@@ -1,8 +1,8 @@
 """
 Async LLM client — thin wrapper around the Anthropic Messages API.
 
-DeepSeek speaks Anthropic Messages API natively, so there is zero
-format conversion. Requests go in as Anthropic, come out as Anthropic.
+Zero format conversion. Requests go in as Anthropic, come out as Anthropic.
+Works with any Anthropic-compatible endpoint (Anthropic, DeepSeek, etc.).
 
 Supports both batch (non-streaming) and SSE streaming modes.
 """
@@ -29,7 +29,7 @@ class LLMClient:
     Usage:
         client = LLMClient()
         resp = await client.messages(
-            model="deepseek-v4-pro",
+            model="claude-sonnet-4-6",
             messages=[{"role": "user", "content": "Hello"}],
             system="You are a helpful assistant.",
             max_tokens=4096,
@@ -37,7 +37,7 @@ class LLMClient:
 
         # Streaming
         async for chunk in client.messages_stream(
-            model="deepseek-v4-pro",
+            model="claude-sonnet-4-6",
             messages=[{"role": "user", "content": "Hello"}],
             max_tokens=4096,
         ):
@@ -193,7 +193,7 @@ class LLMClient:
         thinking: dict | None = None,
     ) -> AsyncIterator[bytes]:
         """
-        Stream SSE bytes from the DeepSeek Anthropic-compatible endpoint.
+        Stream SSE bytes from the Anthropic-compatible endpoint.
 
         Yields raw bytes chunks that can be forwarded directly in a StreamingResponse.
         The upstream API must support `stream: true` and return SSE events.
