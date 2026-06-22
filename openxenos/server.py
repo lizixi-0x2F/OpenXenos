@@ -5,6 +5,10 @@ A thin Anthropic Messages API compatible server.
 Claude Code points its Anthropic base_url here, we intercept the request,
 run multi-model deliberation, and return an Anthropic-format response.
 
+Supports both batch (non-streaming) and SSE streaming (stream=True).
+Streaming passthrough: proxy DeepSeek SSE chunks directly.
+Streaming deliberation: run deliberation, then emit final answer as SSE events.
+
 Usage:
     uv run uvicorn openxenos.server:app --host 0.0.0.0 --port 8787
     uv run openxenos
@@ -16,14 +20,16 @@ Claude Code config:
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import logging
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("openxenos")
@@ -92,6 +98,103 @@ def _get_client() -> LLMClient:
 
 
 # ═══════════════════════════════════════════════════════════════
+# SSE helpers
+# ═══════════════════════════════════════════════════════════════
+
+def _sse_event(event: str, data: dict) -> str:
+    """Encode a single SSE event as bytes."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+async def _stream_deliberation_result(
+    result,
+    request_model: str,
+) -> AsyncIterator[str]:
+    """Generate Anthropic-format SSE events for a deliberation result.
+
+    Yields str chunks (FastAPI StreamingResponse handles str→bytes encoding).
+    This gives Claude Code proper streaming UX with token usage in message_delta.
+    """
+
+    msg_id = f"msg_xenos_{uuid.uuid4().hex[:24]}"
+    model_name = f"openxenos-{PANEL_SIZE}x-{result.phase_1_responses[0].model if result.phase_1_responses else MODEL}"
+
+    usage = result.total_usage
+
+    # message_start
+    yield _sse_event("message_start", {
+        "type": "message_start",
+        "message": {
+            "id": msg_id,
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": model_name,
+            "stop_reason": None,
+            "stop_sequence": None,
+            "usage": {
+                "input_tokens": usage.input_tokens,
+                "output_tokens": 0,
+            },
+        },
+    })
+
+    # Add _openxenos metadata as a custom event (won't confuse Claude Code)
+    yield _sse_event("openxenos_meta", {
+        "panel_size": PANEL_SIZE,
+        "phase_1_previews": [
+            {
+                "model": pr.model,
+                "index": pr.index,
+                "preview": pr.content[:300] + "..." if len(pr.content) > 300 else pr.content,
+            }
+            for pr in result.phase_1_responses
+        ],
+        "refinement_trace": result.refinement_trace,
+        "failed_indices": result.failed_indices,
+    })
+
+    text = result.final_answer
+
+    # content_block_start
+    yield _sse_event("content_block_start", {
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {"type": "text", "text": ""},
+    })
+
+    # content_block_delta — send the entire answer as one delta
+    yield _sse_event("content_block_delta", {
+        "type": "content_block_delta",
+        "index": 0,
+        "delta": {"type": "text_delta", "text": text},
+    })
+
+    # content_block_stop
+    yield _sse_event("content_block_stop", {
+        "type": "content_block_stop",
+        "index": 0,
+    })
+
+    # message_delta — this is where Claude Code gets the token count for display!
+    yield _sse_event("message_delta", {
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": "end_turn",
+            "stop_sequence": None,
+        },
+        "usage": {
+            "output_tokens": usage.output_tokens,
+        },
+    })
+
+    # message_stop
+    yield _sse_event("message_stop", {
+        "type": "message_stop",
+    })
+
+
+# ═══════════════════════════════════════════════════════════════
 # Anthropic Messages API compatible endpoint
 # ═══════════════════════════════════════════════════════════════
 
@@ -102,6 +205,10 @@ async def create_message(request: AnthropicRequest):
 
     Tool-using requests (Claude Code agent loop): pass through directly.
     Pure reasoning requests (no tools): run multi-model deliberation.
+
+    Supports streaming (stream=True) for both paths:
+    - Passthrough: proxy DeepSeek SSE chunks directly.
+    - Deliberation: run deliberation batch, then emit final answer as SSE events.
     """
     client = _get_client()
 
@@ -110,6 +217,36 @@ async def create_message(request: AnthropicRequest):
     # ── Tool request → pass through, no deliberation ──
     if request.tools:
         logger.info("→ tools detected, pass-through (no deliberation)")
+
+        # Streaming passthrough: proxy DeepSeek SSE chunks
+        if request.stream:
+            logger.info("→ streaming passthrough mode")
+            try:
+                stream = client.messages_stream(
+                    model=request.model,
+                    messages=messages_dicts,
+                    system=request.system,
+                    temperature=request.temperature or 0.7,
+                    max_tokens=request.max_tokens,
+                    tools=request.tools,
+                    tool_choice=request.tool_choice,
+                    stop_sequences=request.stop_sequences,
+                    thinking=request.thinking,
+                )
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"API error: {e}")
+
+            return StreamingResponse(
+                stream,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "Connection": "keep-alive",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        # Non-streaming passthrough
         try:
             direct = await client.messages(
                 model=request.model,
@@ -145,6 +282,20 @@ async def create_message(request: AnthropicRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Deliberation failed: {e}")
 
+    # Streaming deliberation: emit final answer as SSE events
+    if request.stream:
+        logger.info("→ streaming deliberation mode")
+        return StreamingResponse(
+            _stream_deliberation_result(result, request.model),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # Non-streaming deliberation
     response = AnthropicResponse(
         id=f"msg_xenos_{uuid.uuid4().hex[:24]}",
         content=[ContentBlock(type="text", text=result.final_answer)],

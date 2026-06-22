@@ -5,8 +5,8 @@ Round 1: N models answer simultaneously — answers stream into a shared
          message pool via as_completed(). Dense: every model's output
          is immediately visible to the group.
 
-Round 2+: All N models see the full accumulated discussion pool.
-          Each decides:
+Round 2+: All N models see the full accumulated discussion pool AND the
+          original conversation context. Each decides:
             DONE → consensus reached, here's the final answer
             REVIEW → still disagree, here's my critique/improvement
 
@@ -42,26 +42,13 @@ def _extract_text(response: AnthropicResponse) -> str:
     return "\n".join(parts)
 
 
-def _extract_question_text(messages: list[dict]) -> str:
-    parts = []
-    for msg in messages:
-        content = msg.get("content", "")
-        if isinstance(content, str):
-            parts.append(content)
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and block.get("type") == "text":
-                    parts.append(block.get("text", ""))
-    return "\n".join(parts).strip()
-
-
 # ═══════════════════════════════════════════════════════════════
 # Discussion pool formatting
 # ═══════════════════════════════════════════════════════════════
 
-def _make_usage(total: int) -> UsageInfo:
-    """Build a UsageInfo from a combined input+output token count."""
-    return UsageInfo(input_tokens=total, output_tokens=total)
+def _make_usage(input_tokens: int, output_tokens: int) -> UsageInfo:
+    """Build a UsageInfo from separately-tracked input and output token counts."""
+    return UsageInfo(input_tokens=input_tokens, output_tokens=output_tokens)
 
 
 def _build_refinement_trace(all_verdicts: list[list[dict]]) -> list[str]:
@@ -81,6 +68,74 @@ def _format_discussion(pool: list[dict]) -> str:
     return "\n\n---\n\n".join(sections)
 
 
+def _format_original_context(messages: list[dict]) -> str:
+    """Format the original conversation messages as readable context.
+
+    Preserves role structure so models understand the conversation flow,
+    including tool calls and tool results.
+    """
+    parts = []
+    for msg in messages:
+        role = msg.get("role", "unknown")
+        content = msg.get("content", "")
+
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            blocks = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                bt = block.get("type", "")
+                if bt == "text":
+                    blocks.append(block.get("text", ""))
+                elif bt == "tool_use":
+                    blocks.append(
+                        f"[Tool Call: {block.get('name', '?')}"
+                        f"({_summarize_input(block.get('input', {}))})]"
+                    )
+                elif bt == "tool_result":
+                    result_content = block.get("content", "")
+                    if isinstance(result_content, list):
+                        result_content = "\n".join(
+                            r.get("text", "") if isinstance(r, dict) else str(r)
+                            for r in result_content
+                        )
+                    blocks.append(
+                        f"[Tool Result: {str(result_content)[:300]}]"
+                    )
+                elif bt == "image":
+                    blocks.append("[Image]")
+                elif bt == "thinking":
+                    blocks.append("[Thinking block]")
+                else:
+                    blocks.append(f"[{bt}]")
+            text = "\n".join(blocks)
+        else:
+            text = str(content)
+
+        if text.strip():
+            parts.append(f"**{role}**: {text}")
+
+    return "\n\n".join(parts)
+
+
+def _summarize_input(input_dict: dict, max_len: int = 120) -> str:
+    """Brief summary of tool input for context display."""
+    if not input_dict:
+        return ""
+    parts = []
+    for k, v in input_dict.items():
+        v_str = str(v)
+        if len(v_str) > 60:
+            v_str = v_str[:57] + "..."
+        parts.append(f"{k}={v_str}")
+    result = ", ".join(parts)
+    if len(result) > max_len:
+        result = result[:max_len - 3] + "..."
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════
 # Round 1: async message passing — dense broadcast
 # ═══════════════════════════════════════════════════════════════
@@ -92,10 +147,13 @@ async def _run_round1(
     system: str | list[dict] | None,
     max_tokens: int,
     thinking: dict | None = None,
-) -> tuple[list[PeerResponse], list[int], int]:
+) -> tuple[list[PeerResponse], list[int], int, int]:
     """
     Round 1 — all N models fire simultaneously.
     as_completed(): answers pool up as they arrive. Dense broadcast.
+
+    Returns:
+        (pool, failed_indices, total_input_tokens, total_output_tokens)
     """
 
     async def call_one(index: int):
@@ -121,28 +179,35 @@ async def _run_round1(
 
     pool: list[PeerResponse] = []
     failed: list[int] = []
-    total_tokens = 0
+    total_input_tokens = 0
+    total_output_tokens = 0
 
     for coro in asyncio.as_completed(tasks):
         index, resp, usage = await coro
         if resp is not None:
             pool.append(resp)
             if usage:
-                total_tokens += usage.input_tokens + usage.output_tokens
+                total_input_tokens += usage.input_tokens
+                total_output_tokens += usage.output_tokens
         else:
             failed.append(index)
 
-    return pool, failed, total_tokens
+    return pool, failed, total_input_tokens, total_output_tokens
 
 
 # ═══════════════════════════════════════════════════════════════
 # Convergence rounds — iterative DONE/REVIEW until consensus
 # ═══════════════════════════════════════════════════════════════
 
-CONVERGENCE_SYSTEM = """You are in a multi-model deliberation that may span several rounds.
+CONVERGENCE_SYSTEM_SUFFIX = """
 
-You will see a discussion history: the original question, Round 1 answers from
-multiple models, and possibly REVIEW critiques from earlier rounds.
+---
+
+[DELIBERATION CONVERGENCE MODE]
+
+You are now in a multi-model deliberation convergence round. The original
+conversation (shown above) provides the full context of what the user needs.
+Below that is the multi-model discussion that has taken place so far.
 
 Your response MUST start with exactly one of these two signals on its own line:
 
@@ -162,14 +227,21 @@ Your critique will be shared with the group in the next round.
 Do NOT use both signals. Pick one."""
 
 
-def _build_convergence_prompt(question: str, discussion_pool: list[dict], round_num: int) -> str:
-    return f"""## Original Question
+def _build_convergence_prompt(
+    messages: list[dict],
+    discussion_pool: list[dict],
+    round_num: int,
+) -> str:
+    """Build the convergence round prompt, preserving original conversation context."""
+    original_context = _format_original_context(messages)
 
-{question}
+    return f"""## Original Conversation
+
+{original_context}
 
 ---
 
-## Discussion So Far (Round 1–{round_num - 1})
+## Multi-Model Deliberation (Rounds 1–{round_num - 1})
 
 {_format_discussion(discussion_pool)}
 
@@ -177,11 +249,15 @@ def _build_convergence_prompt(question: str, discussion_pool: list[dict], round_
 
 ## Your Task (Round {round_num})
 
-Read the discussion above. Decide:
+Read the original conversation and the deliberation above. Decide:
 
-- **DONE**: If the models have substantially converged (same core answer, minor phrasing differences don't count as disagreement), signal DONE and write the final answer.
+- **DONE**: If the models have substantially converged (same core answer,
+  minor phrasing differences don't count as disagreement), signal DONE
+  and write the final answer.
 
-- **REVIEW**: If there are still meaningful disagreements, blind spots, or unresolved issues, signal REVIEW. Explain the issue, then write an improved answer. Your critique will go back to the group.
+- **REVIEW**: If there are still meaningful disagreements, blind spots, or
+  unresolved issues, signal REVIEW. Explain the issue, then write an
+  improved answer. Your critique will go back to the group.
 
 Your response must start with `DONE` or `REVIEW` on its own line."""
 
@@ -189,29 +265,41 @@ Your response must start with `DONE` or `REVIEW` on its own line."""
 async def _run_convergence_round(
     client: LLMClient,
     model: str,
-    question: str,
+    messages: list[dict],
+    system: str | list[dict] | None,
     discussion_pool: list[dict],
     max_tokens: int,
     thinking: dict | None = None,
     round_num: int = 2,
-) -> tuple[str | None, list[dict], int]:
+) -> tuple[str | None, list[dict], int, int]:
     """
-    One convergence round — all N models see the full accumulated discussion pool.
-    Each signals DONE or REVIEW.
+    One convergence round — all N models see the full accumulated discussion pool
+    AND the original conversation context. Each signals DONE or REVIEW.
 
     Returns:
-        (final_answer, verdicts, tokens)
+        (final_answer, verdicts, input_tokens, output_tokens)
         final_answer is None if no model said DONE (all REVIEW → keep discussing).
     """
 
-    prompt = _build_convergence_prompt(question, discussion_pool, round_num)
+    prompt = _build_convergence_prompt(messages, discussion_pool, round_num)
+
+    # Merge original system with convergence instructions
+    if system is None:
+        merged_system = CONVERGENCE_SYSTEM_SUFFIX.strip()
+    elif isinstance(system, str):
+        merged_system = system + CONVERGENCE_SYSTEM_SUFFIX
+    else:
+        # system is a list of content blocks (Anthropic format)
+        merged_system = list(system) + [
+            {"type": "text", "text": CONVERGENCE_SYSTEM_SUFFIX}
+        ]
 
     async def call_one():
         try:
             response = await client.messages(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
-                system=CONVERGENCE_SYSTEM,
+                system=merged_system,
                 temperature=PHASE2_TEMPERATURE,
                 max_tokens=max_tokens,
                 thinking=thinking,
@@ -224,11 +312,13 @@ async def _run_convergence_round(
     results = await asyncio.gather(*[call_one() for _ in range(PANEL_SIZE)])
 
     verdicts: list[dict] = []
-    total_tokens = 0
+    round_input_tokens = 0
+    round_output_tokens = 0
 
     for text, usage in results:
         if text and usage:
-            total_tokens += usage.input_tokens + usage.output_tokens
+            round_input_tokens += usage.input_tokens
+            round_output_tokens += usage.output_tokens
             signal = "REVIEW"  # default
             body = text
             if text.strip().upper().startswith("DONE"):
@@ -242,10 +332,10 @@ async def _run_convergence_round(
     # DONE consensus: first DONE wins, output immediately
     for v in verdicts:
         if v["signal"] == "DONE":
-            return v["body"], verdicts, total_tokens
+            return v["body"], verdicts, round_input_tokens, round_output_tokens
 
     # All REVIEW — no consensus yet, return None to keep discussing
-    return None, verdicts, total_tokens
+    return None, verdicts, round_input_tokens, round_output_tokens
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -264,13 +354,15 @@ async def deliberate(
     Dense iterative deliberation with DONE consensus.
 
     Round 1 — N models answer simultaneously. Dense broadcast via as_completed().
-    Round 2+ — N models see full accumulated discussion, signal DONE or REVIEW.
+              Each model sees the full original conversation context.
+    Round 2+ — N models see full accumulated discussion AND original context,
+               then signal DONE or REVIEW.
                REVIEW = keep discussing. DONE = output immediately.
                Iterates until DONE or MAX_ROUNDS reached.
     """
 
-    # Round 1: dense broadcast
-    pool, failed, r1_tokens = await _run_round1(
+    # Round 1: dense broadcast (full original context)
+    pool, failed, r1_input, r1_output = await _run_round1(
         client, model, messages, system, max_tokens, thinking,
     )
 
@@ -287,12 +379,10 @@ async def deliberate(
         return DeliberationResult(
             phase_1_responses=pool,
             final_answer=pool[0].content,
-            total_usage=_make_usage(r1_tokens),
+            total_usage=_make_usage(r1_input, r1_output),
             failed_indices=failed,
             refinement_trace=[],
         )
-
-    question = _extract_question_text(messages)
 
     # Build initial discussion pool from Round 1 answers
     discussion_pool: list[dict] = [
@@ -300,16 +390,19 @@ async def deliberate(
         for r in pool
     ]
 
-    total_tokens = r1_tokens
+    total_input_tokens = r1_input
+    total_output_tokens = r1_output
     all_verdicts: list[list[dict]] = []
 
     # Iterative convergence — keep discussing until DONE or max rounds
     for round_num in range(2, MAX_ROUNDS + 1):
-        final_answer, verdicts, round_tokens = await _run_convergence_round(
-            client, model, question, discussion_pool, max_tokens, thinking, round_num,
+        final_answer, verdicts, r_input, r_output = await _run_convergence_round(
+            client, model, messages, system, discussion_pool,
+            max_tokens, thinking, round_num,
         )
 
-        total_tokens += round_tokens
+        total_input_tokens += r_input
+        total_output_tokens += r_output
         all_verdicts.append(verdicts)
 
         if final_answer is not None:
@@ -317,7 +410,7 @@ async def deliberate(
             return DeliberationResult(
                 phase_1_responses=pool,
                 final_answer=final_answer,
-                total_usage=_make_usage(total_tokens),
+                total_usage=_make_usage(total_input_tokens, total_output_tokens),
                 failed_indices=failed,
                 refinement_trace=_build_refinement_trace(all_verdicts),
             )
@@ -336,7 +429,7 @@ async def deliberate(
     return DeliberationResult(
         phase_1_responses=pool,
         final_answer=pool[0].content,
-        total_usage=_make_usage(total_tokens),
+        total_usage=_make_usage(total_input_tokens, total_output_tokens),
         failed_indices=failed,
         refinement_trace=trace,
     )
